@@ -1,0 +1,42 @@
+name: Backup Supabase database to R2
+
+on:
+  schedule:
+    # Every 6 hours. This also doubles as the anti-pause ping for the
+    # Supabase Free tier project — the pg_dump connection itself counts
+    # as activity, so no separate keep-alive job is needed.
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Dump, compress, and encrypt
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
+          FILENAME="autodeck-db-${TIMESTAMP}.sql.gz.gpg"
+          pg_dump "$SUPABASE_DB_URL" --no-owner --no-privileges \
+            | gzip \
+            | gpg --batch --yes --symmetric --cipher-algo AES256 \
+                  --passphrase "$BACKUP_PASSPHRASE" \
+                  --output "$FILENAME"
+          echo "FILENAME=$FILENAME" >> "$GITHUB_ENV"
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          aws s3 cp "$FILENAME" "s3://autodeck-db-backups/$FILENAME" \
+            --endpoint-url "${{ secrets.R2_ENDPOINT_URL }}"
+          rm -f "$FILENAME"
